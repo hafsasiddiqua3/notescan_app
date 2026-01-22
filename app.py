@@ -1,14 +1,12 @@
-
 import streamlit as st
-import anthropic
 import base64
 from PIL import Image
 import io
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-import tempfile
-import os
+import requests
+import json
 
 # Page config
 st.set_page_config(
@@ -42,12 +40,21 @@ st.markdown('<p class="sub-header">Convert handwritten notes & diagrams to edita
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.text_input("Anthropic API Key", type="password", help="Get your API key from console.anthropic.com")
+    
+    # Try to get API key from Streamlit secrets first
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+        st.success("✅ API Key configured")
+    except:
+        # Fallback to user input if secrets not configured
+        api_key = st.text_input("Groq API Key", type="password", help="Get your FREE API key from console.groq.com")
+        if not api_key:
+            st.info("💡 Get your FREE Groq API key at console.groq.com")
     
     st.markdown("---")
     st.subheader("📋 Instructions")
     st.markdown("""
-    1. Enter your Anthropic API key
+    1. Get FREE API key from console.groq.com
     2. Upload an image of handwritten notes
     3. Choose output format
     4. Click 'Process Image'
@@ -63,6 +70,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.info("💡 Tip: Clear, well-lit photos work best!")
+    st.success("🆓 Groq API is 100% FREE!")
 
 # Main content
 col1, col2 = st.columns([1, 1])
@@ -108,24 +116,18 @@ with col2:
                     }
                     media_type = media_type_map.get(image.format or 'PNG', 'image/png')
                     
-                    # Call Claude API
-                    client = anthropic.Anthropic(api_key=api_key)
+                    # Call Groq API with vision model
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
                     
-                    message = client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=4096,
-                        messages=[
+                    payload = {
+                        "model": "llama-3.2-90b-vision-preview",
+                        "messages": [
                             {
                                 "role": "user",
                                 "content": [
-                                    {
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type,
-                                            "data": base64_image,
-                                        },
-                                    },
                                     {
                                         "type": "text",
                                         "text": """Please analyze this handwritten note image and extract ALL content in a structured format.
@@ -151,87 +153,109 @@ Format your response as:
 [Chemical equations, math formulas]
 
 Be thorough and accurate. Include everything visible in the image."""
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{media_type};base64,{base64_image}"
+                                        }
                                     }
-                                ],
+                                ]
                             }
                         ],
+                        "temperature": 0.3,
+                        "max_tokens": 4096
+                    }
+                    
+                    response = requests.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=60
                     )
                     
-                    # Extract response
-                    extracted_text = message.content[0].text
-                    
-                    # Display in app
-                    st.success("✅ Processing complete!")
-                    st.markdown("### Extracted Content:")
-                    st.markdown(extracted_text)
-                    
-                    # Prepare download based on format
-                    if "Markdown" in output_format:
-                        st.download_button(
-                            label="📥 Download Markdown",
-                            data=extracted_text,
-                            file_name="extracted_notes.md",
-                            mime="text/markdown",
-                            use_container_width=True
-                        )
-                    
-                    elif "Word Document" in output_format:
-                        # Create Word document
-                        doc = Document()
+                    if response.status_code == 200:
+                        result = response.json()
+                        extracted_text = result['choices'][0]['message']['content']
                         
-                        # Add title
-                        title = doc.add_heading('Extracted Notes', 0)
-                        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        # Display in app
+                        st.success("✅ Processing complete!")
+                        st.markdown("### Extracted Content:")
+                        st.markdown(extracted_text)
                         
-                        # Process markdown-style content
-                        lines = extracted_text.split('\n')
-                        for line in lines:
-                            line = line.strip()
-                            if not line:
-                                continue
+                        # Prepare download based on format
+                        if "Markdown" in output_format:
+                            st.download_button(
+                                label="📥 Download Markdown",
+                                data=extracted_text,
+                                file_name="extracted_notes.md",
+                                mime="text/markdown",
+                                use_container_width=True
+                            )
+                        
+                        elif "Word Document" in output_format:
+                            # Create Word document
+                            doc = Document()
                             
-                            if line.startswith('# '):
-                                doc.add_heading(line[2:], level=1)
-                            elif line.startswith('## '):
-                                doc.add_heading(line[3:], level=2)
-                            elif line.startswith('### '):
-                                doc.add_heading(line[4:], level=3)
-                            elif line.startswith('- ') or line.startswith('* '):
-                                p = doc.add_paragraph(line[2:], style='List Bullet')
-                            else:
-                                doc.add_paragraph(line)
+                            # Add title
+                            title = doc.add_heading('Extracted Notes', 0)
+                            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            
+                            # Process markdown-style content
+                            lines = extracted_text.split('\n')
+                            for line in lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                
+                                if line.startswith('# '):
+                                    doc.add_heading(line[2:], level=1)
+                                elif line.startswith('## '):
+                                    doc.add_heading(line[3:], level=2)
+                                elif line.startswith('### '):
+                                    doc.add_heading(line[4:], level=3)
+                                elif line.startswith('- ') or line.startswith('* '):
+                                    p = doc.add_paragraph(line[2:], style='List Bullet')
+                                else:
+                                    doc.add_paragraph(line)
+                            
+                            # Save to bytes
+                            doc_bytes = io.BytesIO()
+                            doc.save(doc_bytes)
+                            doc_bytes.seek(0)
+                            
+                            st.download_button(
+                                label="📥 Download Word Document",
+                                data=doc_bytes,
+                                file_name="extracted_notes.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True
+                            )
                         
-                        # Save to bytes
-                        doc_bytes = io.BytesIO()
-                        doc.save(doc_bytes)
-                        doc_bytes.seek(0)
-                        
-                        st.download_button(
-                            label="📥 Download Word Document",
-                            data=doc_bytes,
-                            file_name="extracted_notes.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True
-                        )
+                        else:  # Plain text
+                            # Remove markdown formatting for plain text
+                            plain_text = extracted_text.replace('#', '').replace('*', '').replace('_', '')
+                            st.download_button(
+                                label="📥 Download Plain Text",
+                                data=plain_text,
+                                file_name="extracted_notes.txt",
+                                mime="text/plain",
+                                use_container_width=True
+                            )
+                    else:
+                        error_msg = response.json().get('error', {}).get('message', 'Unknown error')
+                        st.error(f"❌ API Error: {error_msg}")
                     
-                    else:  # Plain text
-                        # Remove markdown formatting for plain text
-                        plain_text = extracted_text.replace('#', '').replace('*', '').replace('_', '')
-                        st.download_button(
-                            label="📥 Download Plain Text",
-                            data=plain_text,
-                            file_name="extracted_notes.txt",
-                            mime="text/plain",
-                            use_container_width=True
-                        )
-                    
-                except anthropic.AuthenticationError:
-                    st.error("❌ Invalid API key. Please check your Anthropic API key.")
+                except requests.exceptions.Timeout:
+                    st.error("❌ Request timed out. Please try again with a smaller image.")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"❌ Network error: {str(e)}")
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
     
     elif uploaded_file and not api_key:
-        st.warning("⚠️ Please enter your Anthropic API key in the sidebar to process the image.")
+        st.warning("⚠️ Please enter your Groq API key in the sidebar to process the image.")
+        st.info("👉 Get your FREE API key at: https://console.groq.com")
     
     else:
         st.info("👆 Upload an image to get started!")
@@ -240,7 +264,8 @@ Be thorough and accurate. Include everything visible in the image."""
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p>Built with ❤️ using Streamlit & Claude AI</p>
+    <p>Built with ❤️ using Streamlit & Groq AI</p>
     <p style='font-size: 0.8rem;'>Supports handwriting, diagrams, equations, and more!</p>
+    <p style='font-size: 0.8rem;'>🆓 100% FREE API - Powered by Groq</p>
 </div>
 """, unsafe_allow_html=True)
